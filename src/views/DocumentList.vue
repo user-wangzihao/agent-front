@@ -32,10 +32,23 @@
             <el-tag :type="row.vectorized===1?'success':'info'" size="small">{{row.vectorized===1?'已学习':'未学习'}}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="视频学习" width="110" align="center">
+          <template #default="{row}">
+            <el-tag v-if="getVideoLearnStatus(row.id) === 'none'" size="small" type="info">无视频</el-tag>
+            <el-tag v-else-if="getVideoLearnStatus(row.id) === 'not_learned'" size="small" type="warning">未学习</el-tag>
+            <el-tag v-else-if="getVideoLearnStatus(row.id) === 'learning'" size="small" type="" class="learning-tag">
+              <el-icon class="is-loading"><Loading /></el-icon> 学习中
+            </el-tag>
+            <el-tag v-else-if="getVideoLearnStatus(row.id) === 'learned'" size="small" type="success">已学习</el-tag>
+            <el-tag v-else-if="getVideoLearnStatus(row.id) === 'partial'" size="small" type="warning">部分完成</el-tag>
+            <el-tag v-else-if="getVideoLearnStatus(row.id) === 'failed'" size="small" type="danger">学习失败</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="createTime" label="创建时间" width="180" align="center" />
         <el-table-column label="操作" width="300" align="center" fixed="right">
           <template #default="{row}">
             <el-button type="success" link @click="handleLearn(row)">🧠 {{row.vectorized===1?'重新学习':'学习'}}</el-button>
+            <el-button type="primary" link @click="handleLearnVideo(row)"> 🎬 学习视频 </el-button>
             <el-button type="primary" link :icon="View" @click="$router.push(`/document/detail/${row.id}`)">查看</el-button>
             <el-button type="warning" link :icon="Edit" @click="$router.push(`/document/edit/${row.id}`)">编辑</el-button>
             <el-popconfirm title="确定删除该文档吗？" @confirm="handleDelete(row.id)">
@@ -57,12 +70,16 @@ import { useRouter } from 'vue-router'
 import { pageDocument, deleteDocument, learnDocument } from '../api/document'
 import { ElMessage, ElLoading } from 'element-plus'
 import { Plus, Search, Refresh, View, Edit, Delete } from '@element-plus/icons-vue'
+import { getVideoList, learnVideo } from '../api/video'
+import { Loading } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const loading = ref(false)
 const tableData = ref([])
 const total = ref(0)
 const searchForm = reactive({ pageNum: 1, pageSize: 10, keyword: '' })
+// 存储每个文档关联的视频列表
+const videoStatusMap = ref({})
 
 const loadData = async () => {
   loading.value = true
@@ -70,6 +87,7 @@ const loadData = async () => {
     const res = await pageDocument(searchForm)
     tableData.value = res.data.records
     total.value = Number(res.data.total)
+    loadVideoStatus() // 加载视频状态
   } finally { loading.value = false }
 }
 const handleSearch = () => { searchForm.pageNum = 1; loadData() }
@@ -106,6 +124,97 @@ const handleLearn = async (row) => {
     loadingInstance.close()
   }
 }
+
+// 加载所有文档的视频状态
+const loadVideoStatus = async () => {
+  for (const doc of tableData.value) {
+    try {
+      const res = await getVideoList(doc.id)
+      videoStatusMap.value[doc.id] = res.data || []
+    } catch (e) {
+      videoStatusMap.value[doc.id] = []
+    }
+  }
+}
+
+// 获取某个文档的视频学习状态
+const getVideoLearnStatus = (docId) => {
+  const videos = videoStatusMap.value[docId]
+  if (!videos || videos.length === 0) return 'none'
+
+  const statuses = videos.map(v => v.learnStatus)
+  if (statuses.every(s => s === 2)) return 'learned'
+  if (statuses.some(s => s === 1)) return 'learning'
+  if (statuses.some(s => s === 3) && statuses.some(s => s === 2)) return 'partial'
+  if (statuses.every(s => s === 3)) return 'failed'
+  return 'not_learned'
+}
+
+// 学习视频按钮的处理方法
+const handleLearnVideo = async (row) => {
+  // 先检查有没有视频
+  const videos = videoStatusMap.value[row.id]
+  if (!videos || videos.length === 0) {
+    ElMessage.warning(`「${row.featureName}」没有关联视频，请先在编辑页面上传视频`)
+    return
+  }
+
+  // 检查是否正在学习
+  if (videos.some(v => v.learnStatus === 1)) {
+    ElMessage.warning('视频正在学习中，请稍后')
+    return
+  }
+
+  try {
+    const res = await learnVideo(row.id)
+    ElMessage.success(res.data || '视频学习任务已提交')
+    // 刷新视频状态
+    setTimeout(() => loadVideoStatus(), 1000)
+    // 启动轮询，每5秒刷新一次视频状态，直到学习完成
+    startVideoStatusPolling(row.id)
+  } catch (e) {
+    // error handled by interceptor
+  }
+}
+
+// 轮询视频学习状态
+let pollingTimer = null
+const startVideoStatusPolling = (docId) => {
+  // 清除之前的轮询
+  if (pollingTimer) clearInterval(pollingTimer)
+
+  pollingTimer = setInterval(async () => {
+    try {
+      const res = await getVideoList(docId)
+      videoStatusMap.value[docId] = res.data || []
+
+      // 检查是否全部完成（没有状态为1-学习中的了）
+      const videos = res.data || []
+      const stillLearning = videos.some(v => v.learnStatus === 1)
+      if (!stillLearning) {
+        clearInterval(pollingTimer)
+        pollingTimer = null
+
+        const allSuccess = videos.every(v => v.learnStatus === 2)
+        if (allSuccess) {
+          ElMessage.success('视频学习全部完成！')
+        } else {
+          ElMessage.warning('视频学习已完成，部分视频学习失败')
+        }
+      }
+    } catch (e) {
+      clearInterval(pollingTimer)
+      pollingTimer = null
+    }
+  }, 5000) // 每5秒轮询一次
+}
+
 const handleLogout = () => { localStorage.removeItem('token'); localStorage.removeItem('user'); router.push('/login') }
 onMounted(() => { loadData() })
 </script>
+
+<style scoped>
+.learning-tag .is-loading {
+  margin-right: 4px;
+}
+</style>

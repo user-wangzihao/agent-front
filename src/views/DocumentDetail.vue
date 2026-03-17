@@ -84,6 +84,27 @@
             style="width: 160px; height: 120px; border-radius: 8px;" fit="cover" />
         </div>
       </div>
+
+      <!-- 关联视频 -->
+      <div class="content-card" v-if="videos.length">
+        <div class="section-title">关联教学视频</div>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div v-for="video in videos" :key="video.id" class="video-detail-item">
+            <div class="video-detail-info">
+              <el-icon style="font-size: 24px; color: #667eea;"><VideoPlay /></el-icon>
+              <div>
+                <div style="font-size: 14px; color: #303133;">{{ video.originalName }}</div>
+                <div style="font-size: 12px; color: #909399;">{{ formatFileSize(video.fileSize) }}</div>
+              </div>
+              <el-tag v-if="video.learnStatus === 2" size="small" type="success">已学习</el-tag>
+              <el-tag v-else size="small" type="info">未学习</el-tag>
+            </div>
+            <video :src="video.fileUrl" controls preload="metadata"
+              style="width: 100%; max-width: 720px; border-radius: 8px; background: #000; margin-top: 8px;" />
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 </template>
@@ -92,9 +113,19 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { getDocumentById } from '../api/document'
+import { VideoPlay } from '@element-plus/icons-vue'
+import { getVideoList } from '../api/video'
 
 const route = useRoute()
 const loading = ref(false)
+const videos = ref([])
+
+const formatFileSize = (bytes) => {
+  if (!bytes) return '未知'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
+}
 
 const doc = reactive({
   featureName: '',
@@ -107,6 +138,7 @@ const doc = reactive({
   featureDetails: [],
   operationGuide: null,
   faq: null,
+  videoUrls: [],
 })
 
 onMounted(async () => {
@@ -114,6 +146,8 @@ onMounted(async () => {
   try {
     const res = await getDocumentById(route.params.id)
     Object.assign(doc, res.data)
+    const videoRes = await getVideoList(route.params.id)
+    videos.value = videoRes.data || []
   } finally {
     loading.value = false
   }

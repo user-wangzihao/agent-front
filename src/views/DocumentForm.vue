@@ -120,6 +120,12 @@
         </el-form-item>
       </div>
 
+      <!-- ===== 关联视频 ===== -->
+      <div class="content-card">
+        <div class="section-title">关联教学视频</div>
+        <VideoUploader ref="videoUploaderRef" :featureId="route.params.id" />
+      </div>
+
       <!-- ===== 提交按钮 ===== -->
       <div class="content-card" style="text-align: center; padding: 20px;">
         <el-button @click="$router.push('/')" size="large">取 消</el-button>
@@ -139,12 +145,15 @@ import { addDocument, updateDocument, getDocumentById } from '../api/document'
 import { ElMessage } from 'element-plus'
 import { Plus, Delete } from '@element-plus/icons-vue'
 import ImageUploader from './components/ImageUploader.vue'
+import VideoUploader from './components/VideoUploader.vue'
+import { bindVideos } from '../api/video'
 
 const route = useRoute()
 const router = useRouter()
 const formRef = ref(null)
 const pageLoading = ref(false)
 const submitLoading = ref(false)
+const videoUploaderRef = ref(null)
 
 const isEdit = computed(() => !!route.params.id)
 
@@ -162,6 +171,7 @@ const form = reactive({
   featureDetails: [],
   operationGuide: createEmptySection(),
   faq: createEmptySection(),
+  videoUrls: [],
 })
 
 const rules = {
@@ -196,13 +206,14 @@ const loadDocument = async () => {
       featureDetails: data.featureDetails || [],
       operationGuide: data.operationGuide || createEmptySection(),
       faq: data.faq || createEmptySection(),
+      videoUrls: data.videoUrls || [],
     })
   } finally {
     pageLoading.value = false
   }
 }
 
-// 提交表单
+//提交表单
 const handleSubmit = async () => {
   await formRef.value.validate()
   submitLoading.value = true
@@ -213,7 +224,15 @@ const handleSubmit = async () => {
       await updateDocument(payload)
       ElMessage.success('修改成功')
     } else {
-      await addDocument(payload)
+      const res = await addDocument(payload)
+      // 新增成功后，把上传的视频关联到这个文档
+      const newDocId = res.data
+      if (newDocId && videoUploaderRef.value) {
+        const videoIds = videoUploaderRef.value.getPendingVideoIds()
+        if (videoIds.length > 0) {
+          await bindVideos(newDocId, videoIds)
+        }
+      }
       ElMessage.success('新增成功')
     }
     router.push('/')
