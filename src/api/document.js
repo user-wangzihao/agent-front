@@ -81,8 +81,9 @@ export function updateSessionTitle(sessionId, title) {
  * @param {string} message 用户消息
  * @param {string[]} imageUrls 用户上传的图片URL列表（可选）
  * @param {object} callbacks 回调函数
+ * @param {string|null} selectedFeatureName 用户主动选择的功能名;为空则后端自动识别
  */
-export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, onDone, onError }) {
+export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, onDone, onError }, selectedFeatureName = null) {
   const token = localStorage.getItem('token')
   const controller = new AbortController()
 
@@ -92,7 +93,7 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`,
     },
-    body: JSON.stringify({ sessionId, message, imageUrls: imageUrls || [] }),
+    body: JSON.stringify({ sessionId, message, imageUrls: imageUrls || [], selectedFeatureName }),
     signal: controller.signal,
   })
     .then(async (response) => {
@@ -110,26 +111,20 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
         if (done) break
 
         buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() // 保留不完整的行
 
-        let eventName = ''
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            eventName = line.substring(6).trim()
-          } else if (line.startsWith('data:')) {
-            const data = line.substring(5)
-            if (eventName === 'meta') {
-              try { onMeta?.(JSON.parse(data)) } catch (e) { /* ignore */ }
-            } else if (eventName === 'token') {
-              onToken?.(data)
-            } else if (eventName === 'done') {
-              onDone?.()
-            } else if (eventName === 'error') {
-              onError?.(data)
-            }
-          }
+        // SSE 按"空行"(\n\n) 分割事件,不是按 \n 切行
+        // 这样 token 内的 \n 字符就不会被错误切割
+        let eventBoundary
+        while ((eventBoundary = buffer.indexOf('\n\n')) !== -1) {
+          const rawEvent = buffer.substring(0, eventBoundary)
+          buffer = buffer.substring(eventBoundary + 2)
+
+          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError })
         }
+      }
+      // 处理可能剩余的最后一个事件 (流结束未带空行)
+      if (buffer.trim()) {
+        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onDone, onError })
       }
     })
     .catch((err) => {
@@ -139,6 +134,49 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
     })
 
   return { abort: () => controller.abort() }
+}
+
+/**
+ * 解析单个 SSE 事件块.
+ *
+ * 一个事件块格式:
+ *   event:eventName
+ *   data:第一行
+ *   data:第二行
+ *
+ * 多行 data 需要拼接 (中间用 \n);单行 data 直接用.
+ */
+function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError }) {
+  let eventName = ''
+  const dataLines = []
+
+  for (const line of rawEvent.split('\n')) {
+    if (line.startsWith('event:')) {
+      eventName = line.substring(6).trim()
+    } else if (line.startsWith('data:')) {
+      // 只去掉 "data:" 前缀,**不去前导空格**;保留 token 原始内容
+      // SSE 规范允许 "data: xxx" 写法时去一个空格,但服务端
+      // SseEmitter.event().data(...) 不会自带空格,这里保险按"是否首字符是空格"判断
+      let dataContent = line.substring(5)
+      if (dataContent.startsWith(' ')) dataContent = dataContent.substring(1)
+      dataLines.push(dataContent)
+    }
+  }
+
+  if (!eventName || dataLines.length === 0) return
+
+  // 多行 data 用 \n 连接 (SSE 规范)
+  const data = dataLines.join('\n')
+
+  if (eventName === 'meta') {
+    try { onMeta?.(JSON.parse(data)) } catch (e) { /* ignore */ }
+  } else if (eventName === 'token') {
+    onToken?.(data)
+  } else if (eventName === 'done') {
+    onDone?.()
+  } else if (eventName === 'error') {
+    onError?.(data)
+  }
 }
 
 // ========== 重新生成 ==========
@@ -175,26 +213,16 @@ export function regenerateSSE(messageId, { onMeta, onToken, onDone, onError }) {
         if (done) break
 
         buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop()
 
-        let eventName = ''
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            eventName = line.substring(6).trim()
-          } else if (line.startsWith('data:')) {
-            const data = line.substring(5)
-            if (eventName === 'meta') {
-              try { onMeta?.(JSON.parse(data)) } catch (e) { /* ignore */ }
-            } else if (eventName === 'token') {
-              onToken?.(data)
-            } else if (eventName === 'done') {
-              onDone?.()
-            } else if (eventName === 'error') {
-              onError?.(data)
-            }
-          }
+        let eventBoundary
+        while ((eventBoundary = buffer.indexOf('\n\n')) !== -1) {
+          const rawEvent = buffer.substring(0, eventBoundary)
+          buffer = buffer.substring(eventBoundary + 2)
+          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError })
         }
+      }
+      if (buffer.trim()) {
+        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onDone, onError })
       }
     })
     .catch((err) => {

@@ -140,6 +140,27 @@
         </div>
       </div>
 
+      <!-- Feature 选择条（可选，留空则后端自动识别） -->
+      <div class="feature-select-bar">
+        <span class="feature-label">指定功能：</span>
+        <el-select
+          v-model="selectedFeatureName"
+          placeholder="不指定 (由 AI 自动识别)"
+          clearable
+          filterable
+          size="small"
+          style="width: 240px;"
+        >
+          <el-option
+            v-for="name in featureNames"
+            :key="name"
+            :label="name"
+            :value="name"
+          />
+        </el-select>
+        <span class="feature-hint">不确定就留空</span>
+      </div>
+
       <!-- 输入区域 -->
       <div class="chat-input-area">
         <el-upload
@@ -194,7 +215,8 @@ import { ref, reactive, nextTick, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   getSessionList, createSession, getSessionMessages, deleteSession,
-  chatStreamSSE, regenerateSSE, submitFeedback, exportSession
+  chatStreamSSE, regenerateSSE, submitFeedback, exportSession,
+  pageDocument
 } from '../api/document'
 import { ElMessage } from 'element-plus'
 import { Plus, Fold, Expand, Delete, Promotion, ChatDotRound, PictureFilled, Close } from '@element-plus/icons-vue'
@@ -209,6 +231,9 @@ const currentSessionId = ref(null)
 const sessions = ref([])
 const messages = reactive([])
 const uploadedImages = ref([]) // 用户上传待发送的图片
+// Feature 选择
+const selectedFeatureName = ref(null)
+const featureNames = ref([])
 
 // 反馈相关
 const feedbackDialogVisible = ref(false)
@@ -467,7 +492,7 @@ const handleSend = () => {
       isStreaming.value = false
       streamingContent.value = ''
     },
-  })
+  }, selectedFeatureName.value)
 }
 
 // ==================== 消息复制 ====================
@@ -589,8 +614,22 @@ const handleExport = async () => {
 
 // ==================== 初始化 ====================
 
+const loadFeatureNames = async () => {
+  try {
+    // 复用已有 pageDocument 接口拉一次,把 pageSize 调大避免分页
+    const res = await pageDocument({ pageNum: 1, pageSize: 1000 })
+    const list = res.data?.records || res.data?.list || []
+    const names = [...new Set(list.map(d => d.featureName).filter(Boolean))]
+    featureNames.value = names
+  } catch (e) {
+    console.error('加载功能列表失败', e)
+    // 失败不影响聊天功能,下拉为空即可
+  }
+}
+
 onMounted(() => {
   loadSessions()
+  loadFeatureNames()
 })
 </script>
 
@@ -1128,5 +1167,26 @@ onMounted(() => {
     transform: scale(1);
     opacity: 1;
   }
+}
+
+/* ========== Feature 选择条 ========== */
+.feature-select-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 24px;
+  background: #fafafa;
+  border-top: 1px solid #ebeef5;
+}
+
+.feature-label {
+  font-size: 13px;
+  color: #606266;
+}
+
+.feature-hint {
+  font-size: 12px;
+  color: #909399;
+  margin-left: auto;
 }
 </style>
