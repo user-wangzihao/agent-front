@@ -87,7 +87,7 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
   const token = localStorage.getItem('token')
   const controller = new AbortController()
 
-  fetch('/api/agent/chat/stream', {
+  fetch('/api/graph/chat-stream', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

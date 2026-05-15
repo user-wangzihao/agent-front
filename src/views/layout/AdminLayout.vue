@@ -28,6 +28,11 @@
             <el-icon><ChatLineRound /></el-icon>
             <template #title>FAQ 管理</template>
           </el-menu-item>
+
+          <el-menu-item index="/faq-candidate">
+            <el-icon><Collection /></el-icon>
+            <template #title>FAQ 候选审核</template>
+          </el-menu-item>
         </el-menu>
   
         <!-- 底部操作区 -->
@@ -79,7 +84,7 @@
   import { useRoute, useRouter } from 'vue-router'
   import { ElMessageBox } from 'element-plus'
   import {
-    Document, ChatLineRound, Fold, Expand, Service, SwitchButton
+    Document, ChatLineRound, Fold, Expand, Service, SwitchButton, Collection
   } from '@element-plus/icons-vue'
   
   const route = useRoute()
@@ -91,8 +96,8 @@
   })
   
   const activeMenu = computed(() => {
-    // 子路由（如 /document/add、/document/edit/:id）高亮父菜单
     if (route.path.startsWith('/document')) return '/documents'
+    if (route.path.startsWith('/faq-candidate')) return '/faq-candidate'
     if (route.path.startsWith('/faq')) return '/faq'
     return route.path
   })
@@ -101,8 +106,8 @@
     const titleMap = {
       '/documents': '功能文档管理',
       '/faq': 'FAQ 管理',
+      '/faq-candidate': 'FAQ 候选审核',
     }
-    // 匹配子路径
     if (route.path.startsWith('/document/add')) return '新增功能文档'
     if (route.path.startsWith('/document/edit')) return '编辑功能文档'
     if (route.path.startsWith('/document/detail')) return '文档详情'

@@ -48,6 +48,12 @@ const routes = [
         name: 'FaqList',
         component: () => import('../views/FaqList.vue'),
         meta: { title: 'FAQ管理', adminOnly: true }
+      },
+      {
+        path: 'faq-candidate',
+        name: 'FaqCandidateList',
+        component: () => import('../views/FaqCandidateList.vue'),
+        meta: { title: 'FAQ候选审核', adminOnly: true }
       }
     ]
   },
