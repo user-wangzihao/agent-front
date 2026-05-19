@@ -82,8 +82,9 @@ export function updateSessionTitle(sessionId, title) {
  * @param {string[]} imageUrls 用户上传的图片URL列表（可选）
  * @param {object} callbacks 回调函数
  * @param {string|null} selectedFeatureName 用户主动选择的功能名;为空则后端自动识别
+ * @param {object} extraBody 额外字段(可选), 用于扩展协议字段. 当前支持: regenerateFromMessageId
  */
-export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, onDone, onError }, selectedFeatureName = null) {
+export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, onDone, onError }, selectedFeatureName = null, extraBody = {}) {
   const token = localStorage.getItem('token')
   const controller = new AbortController()
 
@@ -93,7 +94,7 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`,
     },
-    body: JSON.stringify({ sessionId, message, imageUrls: imageUrls || [], selectedFeatureName }),
+    body: JSON.stringify({ sessionId, message, imageUrls: imageUrls || [], selectedFeatureName, ...extraBody }),
     signal: controller.signal,
   })
     .then(async (response) => {
@@ -173,65 +174,15 @@ function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError }
   } else if (eventName === 'token') {
     onToken?.(data)
   } else if (eventName === 'done') {
-    onDone?.()
+    // done 事件可能携带 JSON 元数据 (如 assistantMessageId), 解析失败时降级为无参调用 (兼容旧协议)
+    let doneMeta = null
+    if (data && data.trim()) {
+      try { doneMeta = JSON.parse(data) } catch (e) { /* ignore */ }
+    }
+    onDone?.(doneMeta)
   } else if (eventName === 'error') {
     onError?.(data)
   }
-}
-
-// ========== 重新生成 ==========
-
-/**
- * 重新生成某条 AI 回答（SSE 流式）
- * @param {number} messageId 要重新生成的 assistant 消息ID
- * @param {object} callbacks 回调函数
- */
-export function regenerateSSE(messageId, { onMeta, onToken, onDone, onError }) {
-  const token = localStorage.getItem('token')
-  const controller = new AbortController()
-
-  fetch(`/api/agent/chat/regenerate/${messageId}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    signal: controller.signal,
-  })
-    .then(async (response) => {
-      if (!response.ok) {
-        onError?.(`请求失败: ${response.status}`)
-        return
-      }
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-
-        let eventBoundary
-        while ((eventBoundary = buffer.indexOf('\n\n')) !== -1) {
-          const rawEvent = buffer.substring(0, eventBoundary)
-          buffer = buffer.substring(eventBoundary + 2)
-          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError })
-        }
-      }
-      if (buffer.trim()) {
-        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onDone, onError })
-      }
-    })
-    .catch((err) => {
-      if (err.name !== 'AbortError') {
-        onError?.(err.message || '网络错误')
-      }
-    })
-
-  return { abort: () => controller.abort() }
 }
 
 // ========== 反馈 ==========

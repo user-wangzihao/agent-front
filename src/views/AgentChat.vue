@@ -215,7 +215,7 @@ import { ref, reactive, nextTick, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   getSessionList, createSession, getSessionMessages, deleteSession,
-  chatStreamSSE, regenerateSSE, submitFeedback, exportSession,
+  chatStreamSSE, submitFeedback, exportSession,
   pageDocument
 } from '../api/document'
 import { ElMessage } from 'element-plus'
@@ -474,8 +474,9 @@ const handleSend = () => {
       streamingContent.value += delta
       scrollToBottom()
     },
-    onDone: () => {
+    onDone: (doneMeta) => {
       messages.push({
+        id: doneMeta?.assistantMessageId || null,
         role: 'assistant',
         content: streamingContent.value,
         images: metaData?.relatedImages || [],
@@ -514,28 +515,34 @@ const handleCopy = async (content) => {
 }
 
 // ==================== 重新生成 ====================
+//
+// 第六刀 Batch 4-4: regenerate 已统一到主链路 Graph SSE,
+// 通过给 /api/graph/chat-stream 带 regenerateFromMessageId 字段触发.
+// 后端会反查上一条 user 消息 + 物理删除老 assistant + 跑 Graph + 落库新 assistant.
+// 前端不再单独调 /api/agent/chat/regenerate.
 
 const handleRegenerate = (msg, index) => {
   if (isStreaming.value) return
 
-  // 如果有 messageId（从数据库加载的消息），调后端重新生成
+  // 有 messageId(从 DB 加载或刚生成时 done.data 带回的): 调后端 regenerate
   if (msg.id) {
     isStreaming.value = true
     streamingContent.value = ''
-    // 先从前端列表中移除该条 assistant 消息
+    // 先从前端列表中乐观移除该条 assistant 消息 (后端那边也会物理删, 保持一致)
     messages.splice(index, 1)
     scrollToBottom()
 
     let metaData = null
 
-    regenerateSSE(msg.id, {
+    chatStreamSSE(currentSessionId.value, null, null, {
       onMeta: (meta) => { metaData = meta },
       onToken: (delta) => {
         streamingContent.value += delta
         scrollToBottom()
       },
-      onDone: () => {
+      onDone: (doneMeta) => {
         messages.push({
+          id: doneMeta?.assistantMessageId || null,
           role: 'assistant',
           content: streamingContent.value,
           images: metaData?.relatedImages || [],
@@ -551,14 +558,15 @@ const handleRegenerate = (msg, index) => {
         isStreaming.value = false
         streamingContent.value = ''
       },
-    })
+    }, null, { regenerateFromMessageId: msg.id })
   } else {
-    // 没有 messageId（新发送还没持久化的），简单用最近的用户消息重新发送
+    // 兜底: 极端情况 msg.id 缺失时, 退化为本地"清空 + 重发"
+    // 触发条件: done 事件因网络异常没带回 id (Batch 4-3 hotfix 后此分支应几乎不进入)
     const userMsgIndex = index - 1
     if (userMsgIndex >= 0 && messages[userMsgIndex].role === 'user') {
-      messages.splice(index, 1) // 移除旧回答
+      messages.splice(index, 1)
       inputMessage.value = messages[userMsgIndex].content
-      messages.splice(userMsgIndex, 1) // 移除旧用户消息
+      messages.splice(userMsgIndex, 1)
       handleSend()
     }
   }
