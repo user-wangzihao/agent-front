@@ -33,7 +33,7 @@ request.interceptors.response.use(
       return Promise.reject(error)
     }
     if (error.response?.status === 403) {
-      ElMessage.error('权限不足')
+      // 静默处理：无权限由路由守卫负责跳转，不在这里弹错误
       return Promise.reject(error)
     }
     ElMessage.error(error.message || '网络错误')

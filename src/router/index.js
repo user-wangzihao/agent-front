@@ -54,6 +54,19 @@ const routes = [
         name: 'FaqCandidateList',
         component: () => import('../views/FaqCandidateList.vue'),
         meta: { title: 'FAQ候选审核', adminOnly: true }
+      },
+      {
+        path: 'faq-candidate',
+        name: 'FaqCandidateList',
+        component: () => import('../views/FaqCandidateList.vue'),
+        meta: { title: 'FAQ候选审核', adminOnly: true }
+      },
+      // ↓ B5 新增
+      {
+        path: 'dashboard',
+        name: 'Dashboard',
+        component: () => import('../views/Dashboard.vue'),
+        meta: { title: '运营大屏', adminOnly: true }
       }
     ]
   },
@@ -88,6 +101,9 @@ router.beforeEach((to, from, next) => {
 
   const user = JSON.parse(userStr)
 
+  // 普通用户访问 adminOnly 路由，直接打回 /chat
+  // 必须在此处拦截，不能依赖子路由的 redirect——
+  // redirect 执行前父路由组件已挂载，DocumentList.onMounted 会提前触发接口请求
   if (to.meta.adminOnly && user.role !== 'admin') {
     next('/chat')
     return

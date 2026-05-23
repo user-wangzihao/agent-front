@@ -19,6 +19,11 @@
           active-text-color="#ffffff"
           class="sidebar-menu"
         >
+          <el-menu-item index="/dashboard">
+            <el-icon><DataAnalysis /></el-icon>
+            <template #title>运营大屏</template>
+          </el-menu-item>
+
           <el-menu-item index="/documents">
             <el-icon><Document /></el-icon>
             <template #title>功能文档</template>
@@ -84,7 +89,7 @@
   import { useRoute, useRouter } from 'vue-router'
   import { ElMessageBox } from 'element-plus'
   import {
-    Document, ChatLineRound, Fold, Expand, Service, SwitchButton, Collection
+    Document, ChatLineRound, Fold, Expand, Service, SwitchButton, Collection, DataAnalysis
   } from '@element-plus/icons-vue'
   
   const route = useRoute()
@@ -96,6 +101,7 @@
   })
   
   const activeMenu = computed(() => {
+    if (route.path.startsWith('/dashboard')) return '/dashboard'
     if (route.path.startsWith('/document')) return '/documents'
     if (route.path.startsWith('/faq-candidate')) return '/faq-candidate'
     if (route.path.startsWith('/faq')) return '/faq'
@@ -104,6 +110,7 @@
   
   const currentPageTitle = computed(() => {
     const titleMap = {
+      '/dashboard': '运营大屏',
       '/documents': '功能文档管理',
       '/faq': 'FAQ 管理',
       '/faq-candidate': 'FAQ 候选审核',
