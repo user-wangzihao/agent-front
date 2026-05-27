@@ -95,7 +95,7 @@
               </el-tag>
             </div>
 
-            <!-- AI消息操作栏：复制 / 重新生成 / 反馈 -->
+            <!-- AI消息操作栏：复制 / 重新生成 / 反馈 / 提交工单(B5) -->
             <div v-if="msg.role === 'assistant' && !isStreaming" class="message-actions">
               <el-tooltip content="复制回答" placement="top">
                 <el-button text size="small" @click="handleCopy(msg.content)">
@@ -119,6 +119,23 @@
                   👎
                 </el-button>
               </span>
+              <!-- B5: 提交工单按钮.
+                   三态:
+                     - submittedTicketId 为 null / 未定义: 可点 (蓝色)
+                     - submittedTicketId === 'SUBMITTING': 提交中, 灰色不可点
+                     - submittedTicketId === 'TK-...': 已提单, 灰色不可点, 显示工单号 -->
+              <el-tooltip
+                :content="msg.submittedTicketId ? `工单号: ${msg.submittedTicketId}` : '对答复不满意?转人工处理'"
+                placement="top">
+                <el-button text size="small"
+                  :disabled="!!msg.submittedTicketId"
+                  :class="{ 'ticket-submitted': msg.submittedTicketId && msg.submittedTicketId !== 'SUBMITTING' }"
+                  @click="handleSubmitTicket(msg, index)">
+                  <template v-if="!msg.submittedTicketId">🎫 转工单</template>
+                  <template v-else-if="msg.submittedTicketId === 'SUBMITTING'">⏳ 提交中...</template>
+                  <template v-else>✅ 已提单 {{ msg.submittedTicketId }}</template>
+                </el-button>
+              </el-tooltip>
             </div>
           </div>
         </div>
@@ -207,6 +224,20 @@
         <el-button type="primary" @click="confirmFeedback">提交反馈</el-button>
       </template>
     </el-dialog>
+
+    <!-- ========== B5: 提交工单确认弹框 ========== -->
+    <el-dialog v-model="ticketDialogVisible" title="确认提交工单" width="420px" :close-on-click-modal="false">
+      <p style="margin-bottom: 12px; color: #606266;">
+        您对当前 AI 答复不满意, 提交工单后将转交技术人员人工处理。
+      </p>
+      <p style="margin-bottom: 12px; color: #909399; font-size: 13px;">
+        提交后您会立即收到工单号, 后续可在工单系统中查询处理进度。
+      </p>
+      <template #footer>
+        <el-button @click="ticketDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmSubmitTicket">确认提交</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -216,7 +247,8 @@ import { useRouter } from 'vue-router'
 import {
   getSessionList, createSession, getSessionMessages, deleteSession,
   chatStreamSSE, submitFeedback, exportSession,
-  pageDocument
+  pageDocument,
+  submitTicketForMessageSSE
 } from '../api/document'
 import { ElMessage } from 'element-plus'
 import { Plus, Fold, Expand, Delete, Promotion, ChatDotRound, PictureFilled, Close } from '@element-plus/icons-vue'
@@ -242,6 +274,11 @@ const selectedFeedbackReason = ref('')
 const customFeedbackReason = ref('')
 const pendingFeedbackMsg = ref(null)
 const pendingFeedbackIndex = ref(null)
+
+// B5 提交工单相关
+const ticketDialogVisible = ref(false)
+const pendingTicketMsg = ref(null)
+const pendingTicketIndex = ref(null)
 
 const userInfo = computed(() => {
   try { return JSON.parse(localStorage.getItem('user')) } catch { return null }
@@ -366,6 +403,8 @@ const loadSession = async (sessionId) => {
         sources: m.sources ? tryParse(m.sources) : [],
         userImages: m.userImages ? tryParse(m.userImages) : [],
         feedbackRating: m.feedbackRating || null,
+        // B5: 已提单的消息从 DB 加载时也要带回工单号, 让按钮渲染为已置灰状态
+        submittedTicketId: m.submittedTicketId || null,
       })
     }
     scrollToBottom()
@@ -482,6 +521,7 @@ const handleSend = () => {
         images: metaData?.relatedImages || [],
         sources: metaData?.sources || [],
         feedbackRating: null,
+        submittedTicketId: null,  // B5: 新消息默认未提单, 保持字段一致, 按钮可点
       })
       isStreaming.value = false
       streamingContent.value = ''
@@ -548,6 +588,7 @@ const handleRegenerate = (msg, index) => {
           images: metaData?.relatedImages || [],
           sources: metaData?.sources || [],
           feedbackRating: null,
+          submittedTicketId: null,  // B5: regenerate 出的新消息默认未提单
         })
         isStreaming.value = false
         streamingContent.value = ''
@@ -606,6 +647,119 @@ const confirmFeedback = () => {
 
   feedbackDialogVisible.value = false
   ElMessage.success('反馈已提交，我们会持续改进')
+}
+
+// ==================== B5: 提交工单 ====================
+//
+// 用户点 AI 答复旁的"🎫 转工单"按钮 → 弹确认框 → 用户点"确认提交":
+//   1. 把目标消息 submittedTicketId 乐观设为 'SUBMITTING' (按钮立即置灰显示提交中)
+//   2. 调 submitTicketForMessageSSE → 后端 /api/agent/submit-ticket-for-message
+//      - 后端: 占位 SUBMITTING + 插伪 user 消息"提交工单" + 跑 Graph
+//      - Graph: cache_check MISS → RAG → routeAfterMerger 匹配 → ticket_agent
+//      - ticket_agent → MCP submitTicket → TicketSystem 创建工单
+//      - MCP 拿到 ticketNo 同步回调 main /internal/ticket/callback
+//      - main 回调里 UPDATE submitted_ticket_id=ticketNo + cacheKey 累加负反馈 +3
+//      - LLM 生成"已为您提交工单 TK-..."答复, 流式输出
+//   3. 流式输出期间也插入伪 user "提交工单" 和新 assistant 消息到 messages 列表 (跟正常对话一样)
+//   4. done 事件回调 doneMeta:
+//      - targetAssistantMessageId: 老消息 id
+//      - submittedTicketId: 工单号 (成功) / null (失败, 按钮恢复可点)
+//      - assistantMessageId: 本轮新 assistant 消息 id
+
+const handleSubmitTicket = (msg, index) => {
+  if (isStreaming.value) {
+    ElMessage.warning('请等待当前回答完成')
+    return
+  }
+  if (!msg.id) {
+    ElMessage.error('该消息尚未保存, 无法提交工单')
+    return
+  }
+  if (msg.submittedTicketId) {
+    ElMessage.info(`该消息已${msg.submittedTicketId === 'SUBMITTING' ? '正在' : '已'}提单`)
+    return
+  }
+  pendingTicketMsg.value = msg
+  pendingTicketIndex.value = index
+  ticketDialogVisible.value = true
+}
+
+const confirmSubmitTicket = () => {
+  const targetMsg = pendingTicketMsg.value
+  if (!targetMsg || !targetMsg.id) {
+    ticketDialogVisible.value = false
+    return
+  }
+
+  ticketDialogVisible.value = false
+
+  // 乐观锁定 UI: 按钮立即灰为"提交中..."
+  // 后端的 SUBMITTING 占位也会写, 前后端状态对齐. 失败时 done 回调里恢复 null.
+  targetMsg.submittedTicketId = 'SUBMITTING'
+
+  // 插入"伪 user 消息"到 UI (后端会实际插入到 DB, 这里同步保持 UI 一致;
+  // 注意 push 进 messages 后续不需要 id, 因为对它没有点赞/重新生成等操作)
+  messages.push({
+    role: 'user',
+    content: '提交工单',
+    userImages: [],
+  })
+
+  isStreaming.value = true
+  streamingContent.value = ''
+  scrollToBottom()
+
+  let metaData = null
+
+  submitTicketForMessageSSE(targetMsg.id, {
+    onMeta: (meta) => {
+      metaData = meta
+    },
+    onToken: (delta) => {
+      streamingContent.value += delta
+      scrollToBottom()
+    },
+    onDone: (doneMeta) => {
+      // 新 assistant 消息 (工单结果) 入列
+      messages.push({
+        id: doneMeta?.assistantMessageId || null,
+        role: 'assistant',
+        content: streamingContent.value,
+        images: metaData?.relatedImages || [],
+        sources: metaData?.sources || [],
+        feedbackRating: null,
+        submittedTicketId: null,  // 新 assistant 自身不绑工单
+      })
+
+      // 回填老消息工单号 (后端事实回填的 ticketNo, 已成功 = TK-..., 失败 = null)
+      // 通过 id 查找数组中的目标消息, 避免索引错位 (中间可能新插了 user/assistant 消息)
+      const idx = messages.findIndex(m => m.id === targetMsg.id)
+      if (idx >= 0) {
+        if (doneMeta?.submittedTicketId && doneMeta.submittedTicketId !== 'SUBMITTING') {
+          messages[idx].submittedTicketId = doneMeta.submittedTicketId
+          ElMessage.success(`工单已提交: ${doneMeta.submittedTicketId}`)
+        } else {
+          // 提单失败 (MCP 没回调成功, 后端兜底已回滚 DB), 前端也回滚 UI
+          messages[idx].submittedTicketId = null
+          ElMessage.warning('工单提交失败, 请稍后重试')
+        }
+      }
+
+      isStreaming.value = false
+      streamingContent.value = ''
+      loadSessions()  // 刷新左侧会话列表 (新对话也可能因首轮自动生成标题)
+      scrollToBottom()
+    },
+    onError: (err) => {
+      // 网络错误或后端 4xx/5xx, 老消息状态回滚
+      const idx = messages.findIndex(m => m.id === targetMsg.id)
+      if (idx >= 0) messages[idx].submittedTicketId = null
+      messages.push({ role: 'assistant', content: '工单提交失败: ' + (err || '未知错误') })
+      isStreaming.value = false
+      streamingContent.value = ''
+      ElMessage.error('工单提交失败')
+    },
+  })
 }
 
 // ==================== 对话导出 ====================
@@ -1068,6 +1222,12 @@ onMounted(() => {
 
 .feedback-active {
   color: #667eea !important;
+  font-weight: bold;
+}
+
+/* B5: 已成功提单的按钮样式 (绿色, 区别于普通灰色 disabled) */
+.ticket-submitted {
+  color: #67c23a !important;
   font-weight: bold;
 }
 

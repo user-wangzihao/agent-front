@@ -138,7 +138,7 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
 }
 
 /**
- * 解析单个 SSE 事件块.
+ * 解析单个 SSE 事件块. (B5: 导出供 submitTicketForMessageSSE 复用)
  *
  * 一个事件块格式:
  *   event:eventName
@@ -147,7 +147,7 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
  *
  * 多行 data 需要拼接 (中间用 \n);单行 data 直接用.
  */
-function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError }) {
+export function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError }) {
   let eventName = ''
   const dataLines = []
 
@@ -190,6 +190,79 @@ function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError }
 /** 提交消息反馈（点赞/点踩） */
 export function submitFeedback(data) {
   return request.post('/agent/feedback', data)
+}
+
+// ========== B5: 工单按钮 ==========
+
+/**
+ * 点击 AI 答复旁的"提交工单"按钮触发. 与 chatStreamSSE 同样是 SSE 流式响应,
+ * 后端会插入伪 user 消息"提交工单", 完整跑一遍 Graph (含 ticket_agent 节点 → MCP → TicketSystem),
+ * 流式输出 LLM 的"已为您提交工单 TK-..."答复.
+ *
+ * <p>关键区别于 chatStreamSSE 的两点:
+ * <ul>
+ *   <li>URL: {@code /api/agent/submit-ticket-for-message} (而非 chat-stream)</li>
+ *   <li>Body: 只接受 {@code { targetAssistantMessageId }}, 不传 message/imageUrls 等</li>
+ * </ul>
+ *
+ * <p>done 事件回调 doneMeta 在工单按钮场景额外带:
+ * <ul>
+ *   <li>{@code targetAssistantMessageId}: 老消息 id, 前端据此把那条消息标记为已提单</li>
+ *   <li>{@code submittedTicketId}: 工单号 (TK-...) / null (失败, 按钮可重试)</li>
+ *   <li>{@code assistantMessageId}: 本轮新 assistant 消息 id (LLM 的工单成功答复)</li>
+ * </ul>
+ *
+ * @param targetAssistantMessageId 用户不满意的那条 AI 答复消息 id
+ * @param callbacks  { onMeta, onToken, onDone, onError } — 跟 chatStreamSSE 同形
+ * @return { abort } — 跟 chatStreamSSE 同形
+ */
+export function submitTicketForMessageSSE(targetAssistantMessageId, { onMeta, onToken, onDone, onError }) {
+  const token = localStorage.getItem('token')
+  const controller = new AbortController()
+
+  fetch('/api/agent/submit-ticket-for-message', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ targetAssistantMessageId }),
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        onError?.(`请求失败: ${response.status}`)
+        return
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        let eventBoundary
+        while ((eventBoundary = buffer.indexOf('\n\n')) !== -1) {
+          const rawEvent = buffer.substring(0, eventBoundary)
+          buffer = buffer.substring(eventBoundary + 2)
+          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError })
+        }
+      }
+      if (buffer.trim()) {
+        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onDone, onError })
+      }
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') {
+        onError?.(err.message || '网络错误')
+      }
+    })
+
+  return { abort: () => controller.abort() }
 }
 
 // ========== 对话导出 ==========
