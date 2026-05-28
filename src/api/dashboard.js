@@ -14,3 +14,11 @@ export function getKpiSnapshot() {
 export function getTimeline(limit = 20) {
   return request.get('/admin/dashboard/timeline', { params: { limit } })
 }
+
+/**
+ * B6: 按 feature 聚合缓存条目 (大屏"缓存详情"表格数据源).
+ * 跟 Prometheus 全局命中率卡互补 — 这是冷路径 SQL 直查, 看每个 feature 缓存效果.
+ */
+export function getCacheByFeature() {
+  return request.get('/admin/cache/by-feature')
+}

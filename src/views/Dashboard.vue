@@ -30,11 +30,11 @@
       <div class="kpi-card">
         <div class="kpi-icon latency-icon"><el-icon><Timer /></el-icon></div>
         <div class="kpi-body">
-          <div class="kpi-label">Graph 端到端耗时</div>
+          <div class="kpi-label">Graph 端到端耗时 (P95)</div>
           <div class="kpi-value">
             {{ kpi.graphLatencyP95Ms ? kpi.graphLatencyP95Ms + ' ms' : '—' }}
           </div>
-          <div class="kpi-sub">P95 &nbsp;|&nbsp; P50 {{ kpi.graphLatencyP50Ms ?? 0 }} ms</div>
+          <div class="kpi-sub">P50 {{ kpi.graphLatencyP50Ms ?? 0 }} ms</div>
         </div>
       </div>
 
@@ -80,6 +80,22 @@
         </div>
       </div>
 
+      <!-- 卡6: 缓存命中率 (B6) -->
+      <!-- 数据来源: Prometheus 24h 窗口聚合 (sum/L1/L2/miss). 故意不暴露 feature_name 标签
+           避免高基数 (700+ feature). 按 feature 拆分见下方"缓存详情"表格 (SQL 直查). -->
+      <div class="kpi-card">
+        <div class="kpi-icon cache-icon"><el-icon><CoffeeCup /></el-icon></div>
+        <div class="kpi-body">
+          <div class="kpi-label">缓存命中率 (24h)</div>
+          <div class="kpi-value">{{ kpi.cacheHitRate != null ? kpi.cacheHitRate + '%' : '—' }}</div>
+          <div class="kpi-sub">
+            L1 {{ kpi.cacheHitL1Count ?? 0 }} &nbsp;|&nbsp;
+            L2 {{ kpi.cacheHitL2Count ?? 0 }} &nbsp;|&nbsp;
+            miss {{ kpi.cacheMissCount ?? 0 }}
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- 滚动时间线 -->
@@ -115,6 +131,44 @@
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- ========== B6: 缓存详情 (按 feature 拆分) ========== -->
+    <!-- 跟卡6 互补: 卡6 看全局命中率 (Prometheus), 这里看每个 feature 缓存效果 (SQL 直查 semantic_cache 表).
+         数据来源故意不走 Prometheus, 因为 feature 数量 700+ 会导致 Prometheus 基数爆炸. -->
+    <div class="section-title">缓存详情（按功能）</div>
+    <el-table
+      :data="cacheByFeature"
+      v-loading="cacheLoading"
+      style="width: 100%"
+      :stripe="true"
+      size="small"
+      :default-sort="{ prop: 'totalHits', order: 'descending' }"
+      max-height="400"
+    >
+      <el-table-column label="功能模块" prop="featureName" min-width="180" show-overflow-tooltip />
+      <el-table-column label="缓存条目数" prop="totalEntries" width="110" align="right" sortable />
+      <el-table-column label="累计命中" prop="totalHits" width="100" align="right" sortable />
+      <el-table-column label="负反馈分" prop="totalFeedbackScore" width="100" align="right" sortable>
+        <template #default="{ row }">
+          <span :class="feedbackClass(row.totalFeedbackScore)">{{ row.totalFeedbackScore }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="ACTIVE" prop="activeCount" width="90" align="center">
+        <template #default="{ row }">
+          <el-tag size="small" type="success">{{ row.activeCount }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="DEGRADED" prop="degradedCount" width="100" align="center">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.degradedCount > 0 ? 'warning' : 'info'">{{ row.degradedCount }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="INVALID" prop="invalidCount" width="90" align="center">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.invalidCount > 0 ? 'danger' : 'info'">{{ row.invalidCount }}</el-tag>
+        </template>
+      </el-table-column>
+    </el-table>
   </div>
 </template>
 
@@ -122,15 +176,17 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  Refresh, ChatDotRound, Timer, CircleCheck, Coin, DataAnalysis
+  Refresh, ChatDotRound, Timer, CircleCheck, Coin, DataAnalysis, CoffeeCup
 } from '@element-plus/icons-vue'
-import { getKpiSnapshot, getTimeline } from '@/api/dashboard'
+import { getKpiSnapshot, getTimeline, getCacheByFeature } from '@/api/dashboard'
 
 // ==================== 状态 ====================
 const kpi = ref({})
 const timeline = ref([])
+const cacheByFeature = ref([])  // B6: 缓存详情表格数据
 const kpiLoading = ref(false)
 const timelineLoading = ref(false)
+const cacheLoading = ref(false)  // B6
 const lastUpdatedAt = ref(null)
 let timer = null
 
@@ -169,8 +225,21 @@ async function loadTimeline() {
   }
 }
 
+// B6: 加载按 feature 聚合的缓存详情. 失败静默, 这是辅助信息不影响主功能.
+async function loadCacheByFeature() {
+  cacheLoading.value = true
+  try {
+    const res = await getCacheByFeature()
+    cacheByFeature.value = res.data || []
+  } catch (e) {
+    // 静默, 不弹错误
+  } finally {
+    cacheLoading.value = false
+  }
+}
+
 async function refresh() {
-  await Promise.all([loadKpi(), loadTimeline()])
+  await Promise.all([loadKpi(), loadTimeline(), loadCacheByFeature()])
 }
 
 // ==================== 生命周期 ====================
@@ -210,6 +279,13 @@ function latencyClass(ms) {
   if (ms < 3000) return 'latency-good'
   if (ms < 8000) return 'latency-warn'
   return 'latency-bad'
+}
+
+// B6: 负反馈分着色. 0=正常灰, <5=轻微黄, >=5=明显红 (按 SemanticCacheProperties.feedbackThreshold 默认 5 来定阈值).
+function feedbackClass(score) {
+  if (score == null || score === 0) return ''
+  if (score < 5) return 'feedback-warn'
+  return 'feedback-bad'
 }
 </script>
 
@@ -282,6 +358,7 @@ function latencyClass(ms) {
 .faq-icon      { background: #fdf6ec; color: #e6a23c; }
 .token-icon    { background: #fef0f0; color: #f56c6c; }
 .flywheel-icon { background: #f4f4f5; color: #909399; }
+.cache-icon    { background: #f0f5ff; color: #5e72e4; }   /* B6: 紫蓝色, 跟其他卡区分 */
 
 .kpi-body {
   flex: 1;
@@ -328,7 +405,11 @@ function latencyClass(ms) {
 /* ===== 时间线耗时颜色 ===== */
 .latency-good { color: #67c23a; }
 .latency-warn { color: #e6a23c; }
-.latency-bad  { color: #f56c6c; font-weight: 600; }
+.latency-bad  { color: #f56c6c; }
+
+/* B6: 负反馈分着色, 跟 latency 类同款配色 */
+.feedback-warn { color: #e6a23c; font-weight: 600; }
+.feedback-bad  { color: #f56c6c; font-weight: 600; }
 
 .text-muted { color: #909399; font-size: 13px; }
 
