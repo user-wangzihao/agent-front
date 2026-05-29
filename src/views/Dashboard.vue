@@ -96,6 +96,37 @@
         </div>
       </div>
 
+      <!-- 卡7: Self-RAG 自反思裁决 (最后一刀) -->
+      <!-- 数据来源: Prometheus agent_reflect_verdict_total 按 verdict 分组, 24h 窗口.
+           量化 how-to 类回答质量: 一次过率 / 纠正率 / 第2版胜出率 / 假问题率. -->
+      <div class="kpi-card">
+        <div class="kpi-icon reflect-icon"><el-icon><MagicStick /></el-icon></div>
+        <div class="kpi-body">
+          <div class="kpi-label">自反思一次过率 (24h)</div>
+          <div class="kpi-value">{{ kpi.reflectPassRate != null ? kpi.reflectPassRate + '%' : '—' }}</div>
+          <div class="kpi-sub">
+            纠正 {{ kpi.reflectRetryRate ?? 0 }}% &nbsp;|&nbsp;
+            二版胜出 {{ kpi.reflectV2WinRate ?? 0 }}% &nbsp;|&nbsp;
+            兜底 {{ kpi.reflectGiveUpRate ?? 0 }}%
+          </div>
+        </div>
+      </div>
+
+      <!-- 卡8: Self-RAG judge 延迟 (思路B: 量化自反思延迟成本) -->
+      <div class="kpi-card">
+        <div class="kpi-icon judge-icon"><el-icon><Stopwatch /></el-icon></div>
+        <div class="kpi-body">
+          <div class="kpi-label">自反思 judge 耗时 (P95)</div>
+          <div class="kpi-value">
+            {{ kpi.reflectJudgeLatencyP95Ms ? kpi.reflectJudgeLatencyP95Ms + ' ms' : '—' }}
+          </div>
+          <div class="kpi-sub">
+            P50 {{ kpi.reflectJudgeLatencyP50Ms ?? 0 }} ms &nbsp;|&nbsp;
+            共评估 {{ kpi.reflectTotalCount ?? 0 }} 次
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- 滚动时间线 -->
@@ -176,7 +207,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  Refresh, ChatDotRound, Timer, CircleCheck, Coin, DataAnalysis, CoffeeCup
+  Refresh, ChatDotRound, Timer, CircleCheck, Coin, DataAnalysis, CoffeeCup, MagicStick, Stopwatch
 } from '@element-plus/icons-vue'
 import { getKpiSnapshot, getTimeline, getCacheByFeature } from '@/api/dashboard'
 
@@ -359,6 +390,8 @@ function feedbackClass(score) {
 .token-icon    { background: #fef0f0; color: #f56c6c; }
 .flywheel-icon { background: #f4f4f5; color: #909399; }
 .cache-icon    { background: #f0f5ff; color: #5e72e4; }   /* B6: 紫蓝色, 跟其他卡区分 */
+.reflect-icon  { background: #f0f9eb; color: #67c23a; }   /* Self-RAG: 绿色, 质量正向 */
+.judge-icon    { background: #fdf6ec; color: #e6a23c; }   /* Self-RAG: 橙色, 延迟成本 */
 
 .kpi-body {
   flex: 1;

@@ -84,7 +84,7 @@ export function updateSessionTitle(sessionId, title) {
  * @param {string|null} selectedFeatureName 用户主动选择的功能名;为空则后端自动识别
  * @param {object} extraBody 额外字段(可选), 用于扩展协议字段. 当前支持: regenerateFromMessageId
  */
-export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, onDone, onError }, selectedFeatureName = null, extraBody = {}) {
+export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, onReplay, onDone, onError }, selectedFeatureName = null, extraBody = {}) {
   const token = localStorage.getItem('token')
   const controller = new AbortController()
 
@@ -120,12 +120,12 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
           const rawEvent = buffer.substring(0, eventBoundary)
           buffer = buffer.substring(eventBoundary + 2)
 
-          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError })
+          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onReplay, onDone, onError })
         }
       }
       // 处理可能剩余的最后一个事件 (流结束未带空行)
       if (buffer.trim()) {
-        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onDone, onError })
+        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onReplay, onDone, onError })
       }
     })
     .catch((err) => {
@@ -147,7 +147,7 @@ export function chatStreamSSE(sessionId, message, imageUrls, { onMeta, onToken, 
  *
  * 多行 data 需要拼接 (中间用 \n);单行 data 直接用.
  */
-export function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError }) {
+export function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onReplay, onDone, onError }) {
   let eventName = ''
   const dataLines = []
 
@@ -173,6 +173,11 @@ export function parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, on
     try { onMeta?.(JSON.parse(data)) } catch (e) { /* ignore */ }
   } else if (eventName === 'token') {
     onToken?.(data)
+  } else if (eventName === 'replay') {
+    // Self-RAG: knowledge 路径同步生成后, 后端用 replay 事件一次性推送完整答案.
+    // 前端据此做"模拟流式"逐字播放 (见 AgentChat 的 onReplay). 与流式 token 互斥:
+    // 同步路径只发 replay 不发 token, 流式路径(chitchat)只发 token 不发 replay.
+    onReplay?.(data)
   } else if (eventName === 'done') {
     // done 事件可能携带 JSON 元数据 (如 assistantMessageId), 解析失败时降级为无参调用 (兼容旧协议)
     let doneMeta = null
@@ -249,11 +254,11 @@ export function submitTicketForMessageSSE(targetAssistantMessageId, { onMeta, on
         while ((eventBoundary = buffer.indexOf('\n\n')) !== -1) {
           const rawEvent = buffer.substring(0, eventBoundary)
           buffer = buffer.substring(eventBoundary + 2)
-          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onDone, onError })
+          parseAndDispatchSseEvent(rawEvent, { onMeta, onToken, onReplay, onDone, onError })
         }
       }
       if (buffer.trim()) {
-        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onDone, onError })
+        parseAndDispatchSseEvent(buffer, { onMeta, onToken, onReplay, onDone, onError })
       }
     })
     .catch((err) => {

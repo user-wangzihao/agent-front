@@ -144,7 +144,12 @@
         <div v-if="isStreaming" class="message-row message-agent">
           <div class="message-avatar">🤖</div>
           <div class="message-body">
-            <div class="message-bubble markdown-body" v-html="renderMarkdown(streamingContent || '思考中...')"></div>
+            <!-- streamingContent 为空 = 还在等答案 → 显示阶段式思考提示(呼吸动画);
+                 一旦有内容(流式 token 或 replay 逐字) → 显示真实答案 -->
+            <div v-if="!streamingContent" class="message-bubble thinking-stage">
+              <span class="thinking-stage-text">{{ thinkingStages[thinkingStageIndex] }}</span>
+            </div>
+            <div v-else class="message-bubble markdown-body" v-html="renderMarkdown(streamingContent)"></div>
           </div>
         </div>
       </div>
@@ -242,7 +247,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, onMounted, computed } from 'vue'
+import { ref, reactive, nextTick, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   getSessionList, createSession, getSessionMessages, deleteSession,
@@ -258,6 +263,18 @@ const messagesRef = ref(null)
 const inputMessage = ref('')
 const isStreaming = ref(false)
 const streamingContent = ref('')
+
+// Self-RAG: 思考阶段提示 (knowledge 路径同步生成期间, 前端无 token 流, 用阶段文案填充等待感).
+// 纯前端定时器驱动的"善意演出"; 真实切换锚点是后端 replay 事件到达 → 立刻切到逐字播放.
+const thinkingStages = [
+  '🔍 正在检索知识库…',
+  '🧠 正在分析与评估…',
+  '✍️ 正在生成高质量答案…',
+]
+const thinkingStageIndex = ref(0)
+let thinkingTimer = null
+// replay 逐字播放定时器
+let replayTimer = null
 const sidebarCollapsed = ref(false)
 const currentSessionId = ref(null)
 const sessions = ref([])
@@ -476,6 +493,46 @@ const removeUploadedImage = (index) => {
 
 // ==================== 发送消息（SSE 流式） ====================
 
+// Self-RAG: 启动思考阶段文案轮播 (3 段, 每段约 1.6s 推进; 停在最后一段直到 replay 到达).
+const startThinkingStages = () => {
+  thinkingStageIndex.value = 0
+  stopThinkingStages()
+  thinkingTimer = setInterval(() => {
+    if (thinkingStageIndex.value < thinkingStages.length - 1) {
+      thinkingStageIndex.value++
+    } else {
+      stopThinkingStages() // 停在"生成高质量答案…", 等 replay
+    }
+  }, 1600)
+}
+const stopThinkingStages = () => {
+  if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null }
+}
+
+// Self-RAG: 模拟流式 — 把完整答案逐字喂进 streamingContent, 播完调 onComplete.
+// 真信号锚点: replay 事件一到立即从"思考中"切到这里, 不再受思考阶段轮播影响.
+const playReplay = (fullText, onComplete) => {
+  stopThinkingStages()
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null }
+  streamingContent.value = ''
+  if (!fullText) { onComplete?.(); return }
+
+  const chars = Array.from(fullText) // 按码点切, 兼容 emoji/中文
+  let i = 0
+  // 每 tick 吐 2 个字符, 12ms/tick → 约 167 字/秒, 长答案不会太慢
+  const STEP = 2
+  const INTERVAL_MS = 12
+  replayTimer = setInterval(() => {
+    streamingContent.value += chars.slice(i, i + STEP).join('')
+    i += STEP
+    scrollToBottom()
+    if (i >= chars.length) {
+      clearInterval(replayTimer); replayTimer = null
+      onComplete?.()
+    }
+  }, INTERVAL_MS)
+}
+
 const sendHint = (hint) => {
   inputMessage.value = hint
   handleSend()
@@ -498,9 +555,27 @@ const handleSend = () => {
   uploadedImages.value = []
   isStreaming.value = true
   streamingContent.value = ''
+  startThinkingStages()  // Self-RAG: 启动思考阶段文案 (同步路径等待期填充)
   scrollToBottom()
 
   let metaData = null
+  let replayText = null  // Self-RAG: 同步路径的完整答案 (replay 事件携带)
+
+  const finalizeAssistant = (doneMeta) => {
+    messages.push({
+      id: doneMeta?.assistantMessageId || null,
+      role: 'assistant',
+      content: streamingContent.value,
+      images: metaData?.relatedImages || [],
+      sources: metaData?.sources || [],
+      feedbackRating: null,
+      submittedTicketId: null,  // B5: 新消息默认未提单, 保持字段一致, 按钮可点
+    })
+    isStreaming.value = false
+    streamingContent.value = ''
+    loadSessions()
+    scrollToBottom()
+  }
 
   chatStreamSSE(currentSessionId.value, msg || '请分析我上传的截图', imgs, {
     onMeta: (meta) => {
@@ -510,25 +585,26 @@ const handleSend = () => {
       }
     },
     onToken: (delta) => {
+      // 流式路径 (chitchat): 第一个 token 到达即停思考阶段, 进入真流式
+      stopThinkingStages()
       streamingContent.value += delta
       scrollToBottom()
     },
+    onReplay: (fullText) => {
+      // Self-RAG 同步路径: 存下完整答案, 待 onDone 触发逐字播放
+      replayText = fullText
+    },
     onDone: (doneMeta) => {
-      messages.push({
-        id: doneMeta?.assistantMessageId || null,
-        role: 'assistant',
-        content: streamingContent.value,
-        images: metaData?.relatedImages || [],
-        sources: metaData?.sources || [],
-        feedbackRating: null,
-        submittedTicketId: null,  // B5: 新消息默认未提单, 保持字段一致, 按钮可点
-      })
-      isStreaming.value = false
-      streamingContent.value = ''
-      loadSessions()
-      scrollToBottom()
+      if (replayText !== null) {
+        // 同步路径: 逐字播放完整答案, 播完才落定 (动画由 onDone 驱动, 无竞态)
+        playReplay(replayText, () => finalizeAssistant(doneMeta))
+      } else {
+        // 流式路径: streamingContent 已由 token 累积完成, 直接落定
+        finalizeAssistant(doneMeta)
+      }
     },
     onError: (err) => {
+      stopThinkingStages()
       messages.push({ role: 'assistant', content: '抱歉，出了点问题：' + (err || '未知错误') })
       isStreaming.value = false
       streamingContent.value = ''
@@ -570,31 +646,44 @@ const handleRegenerate = (msg, index) => {
     streamingContent.value = ''
     // 先从前端列表中乐观移除该条 assistant 消息 (后端那边也会物理删, 保持一致)
     messages.splice(index, 1)
+    startThinkingStages()  // Self-RAG: 启动思考阶段文案
     scrollToBottom()
 
     let metaData = null
+    let replayText = null  // Self-RAG: 同步路径完整答案
+
+    const finalizeAssistant = (doneMeta) => {
+      messages.push({
+        id: doneMeta?.assistantMessageId || null,
+        role: 'assistant',
+        content: streamingContent.value,
+        images: metaData?.relatedImages || [],
+        sources: metaData?.sources || [],
+        feedbackRating: null,
+        submittedTicketId: null,  // B5: regenerate 出的新消息默认未提单
+      })
+      isStreaming.value = false
+      streamingContent.value = ''
+      scrollToBottom()
+    }
 
     chatStreamSSE(currentSessionId.value, null, null, {
       onMeta: (meta) => { metaData = meta },
       onToken: (delta) => {
+        stopThinkingStages()
         streamingContent.value += delta
         scrollToBottom()
       },
+      onReplay: (fullText) => { replayText = fullText },
       onDone: (doneMeta) => {
-        messages.push({
-          id: doneMeta?.assistantMessageId || null,
-          role: 'assistant',
-          content: streamingContent.value,
-          images: metaData?.relatedImages || [],
-          sources: metaData?.sources || [],
-          feedbackRating: null,
-          submittedTicketId: null,  // B5: regenerate 出的新消息默认未提单
-        })
-        isStreaming.value = false
-        streamingContent.value = ''
-        scrollToBottom()
+        if (replayText !== null) {
+          playReplay(replayText, () => finalizeAssistant(doneMeta))
+        } else {
+          finalizeAssistant(doneMeta)
+        }
       },
       onError: (err) => {
+        stopThinkingStages()
         messages.push({ role: 'assistant', content: '重新生成失败：' + (err || '未知错误') })
         isStreaming.value = false
         streamingContent.value = ''
@@ -792,6 +881,12 @@ const loadFeatureNames = async () => {
 onMounted(() => {
   loadSessions()
   loadFeatureNames()
+})
+
+// Self-RAG: 离开页面时清理思考阶段/逐字播放定时器, 防内存泄漏
+onBeforeUnmount(() => {
+  stopThinkingStages()
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null }
 })
 </script>
 
@@ -1304,6 +1399,21 @@ onMounted(() => {
 }
 
 /* ========== 流式输出动画 ========== */
+/* Self-RAG: 思考阶段提示 — 呼吸渐变, 让用户感到"持续被服务" */
+.thinking-stage {
+  display: inline-flex;
+  align-items: center;
+}
+.thinking-stage-text {
+  font-size: 14px;
+  color: #667eea;
+  animation: thinking-breath 1.6s ease-in-out infinite;
+}
+@keyframes thinking-breath {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1; }
+}
+
 .typing-indicator {
   display: flex;
   gap: 4px;
